@@ -1,4 +1,16 @@
 name: BloodFix
-version: '${project.version}'
+version: 1.3
 main: com.bloodfix.bloodfix.BloodFix
-api-version: '1.16'
+api-version: 1.16
+author: BloodFix
+commands:
+  bloodfix:
+    description: Главная команда BloodFix.
+    permission: bloodfix.admin
+permissions:
+  bloodfix.admin:
+    description: Доступ к перезагрузке конфига.
+    default: op
+  bloodfix.use:
+    description: Использование приоритетной починки.
+    default: true

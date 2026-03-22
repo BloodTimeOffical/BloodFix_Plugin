@@ -1,6 +1,10 @@
 package com.bloodfix.bloodfix;
 
+import net.md_5.bungee.api.ChatColor;
 import org.bukkit.Material;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandExecutor;
+import org.bukkit.command.CommandSender;
 import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -9,85 +13,123 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerExpChangeEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.Damageable;
+import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-public final class BloodFix extends JavaPlugin implements Listener {
+public final class BloodFix extends JavaPlugin implements Listener, CommandExecutor {
+
+    private final Pattern hexPattern = Pattern.compile("&#[a-fA-F0-9]{6}");
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
         getServer().getPluginManager().registerEvents(this, this);
-        getLogger().info("BloodFix активирован! Приоритет на самую сломанную броню включен.");
+        if (getCommand("bloodfix") != null) {
+            getCommand("bloodfix").setExecutor(this);
+        }
+        getLogger().info("BloodFix запущен! (v1.3 | 1.16-1.21)");
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onExpChange(PlayerExpChangeEvent event) {
         Player player = event.getPlayer();
-        int amount = event.getAmount();
+        if (!player.hasPermission("bloodfix.use")) return;
 
-        if (amount <= 0) return;
+        int expAmount = event.getAmount();
+        if (expAmount <= 0) return;
 
-        // Шанс из конфига (например, 80%)
-        double priorityChance = getConfig().getDouble("priority-chance-percent", 80.0) / 100.0;
+        List<ItemStack> mendingItems = getMendingItems(player);
+        if (mendingItems.isEmpty()) return;
 
-        if (Math.random() <= priorityChance) {
-            ItemStack mostDamaged = getMostDamagedItem(player);
+        Map<ItemStack, Double> weights = new HashMap<>();
+        double totalWeight = 0;
+        double power = getConfig().getDouble("priority-power", 2.5);
 
-            if (mostDamaged != null) {
-                // 1 единица опыта чинит 2 единицы прочности
-                int repairAmount = amount * 2;
-
-                Damageable meta = (Damageable) mostDamaged.getItemMeta();
-                if (meta != null) {
-                    int currentDamage = meta.getDamage();
-                    int newDamage = Math.max(0, currentDamage - repairAmount);
-
-                    // Вычисляем, сколько опыта реально потрачено на починку
-                    int usedExp = (currentDamage - newDamage) / 2;
-
-                    meta.setDamage(newDamage);
-                    mostDamaged.setItemMeta(meta);
-
-                    // Вычитаем потраченный опыт, чтобы он не шел в полоску уровня
-                    event.setAmount(Math.max(0, amount - usedExp));
+        for (ItemStack item : mendingItems) {
+            ItemMeta meta = item.getItemMeta();
+            if (meta instanceof Damageable dmg) {
+                if (dmg.hasDamage()) {
+                    // Рассчитываем приоритет на основе % поломки
+                    double percent = (double) dmg.getDamage() / item.getType().getMaxDurability();
+                    double weight = Math.pow(percent, power);
+                    weights.put(item, weight);
+                    totalWeight += weight;
                 }
             }
         }
+
+        if (totalWeight <= 0) return;
+
+        int repairPotential = expAmount * 2; // 1 опыт = 2 прочности
+        int usedExp = 0;
+
+        for (Map.Entry<ItemStack, Double> entry : weights.entrySet()) {
+            ItemStack item = entry.getKey();
+            double share = entry.getValue() / totalWeight;
+            int repairAmount = (int) (repairPotential * share);
+
+            if (repairAmount > 0) {
+                Damageable meta = (Damageable) item.getItemMeta();
+                if (meta != null) {
+                    int currentDmg = meta.getDamage();
+                    int toRepair = Math.min(currentDmg, repairAmount);
+                    meta.setDamage(currentDmg - toRepair);
+                    item.setItemMeta(meta);
+                    usedExp += (int) Math.ceil(toRepair / 2.0);
+                }
+            }
+        }
+        // Остаток опыта идет в уровень игрока
+        event.setAmount(Math.max(0, expAmount - usedExp));
     }
 
-    private ItemStack getMostDamagedItem(Player player) {
-        ItemStack target = null;
-        double maxDamagePercent = 0;
-
+    private List<ItemStack> getMendingItems(Player player) {
         List<ItemStack> items = new ArrayList<>();
-        // Проверяем броню
+        // Броня
         ItemStack[] armor = player.getInventory().getArmorContents();
         if (armor != null) {
-            for (ItemStack piece : armor) {
-                if (piece != null && piece.getType() != Material.AIR) items.add(piece);
-            }
+            for (ItemStack i : armor) if (isMending(i)) items.add(i);
         }
-        // Проверяем руки (инструменты)
-        items.add(player.getInventory().getItemInMainHand());
-        items.add(player.getInventory().getItemInOffHand());
+        // Руки
+        if (isMending(player.getInventory().getItemInMainHand())) items.add(player.getInventory().getItemInMainHand());
+        if (isMending(player.getInventory().getItemInOffHand())) items.add(player.getInventory().getItemInOffHand());
+        return items;
+    }
 
-        for (ItemStack item : items) {
-            if (item == null || !item.containsEnchantment(Enchantment.MENDING)) continue;
+    private boolean isMending(ItemStack item) {
+        return item != null && item.getType() != Material.AIR && item.containsEnchantment(Enchantment.MENDING);
+    }
 
-            if (item.getItemMeta() instanceof Damageable meta) {
-                if (meta.hasDamage()) {
-                    // Считаем процент поломки
-                    double percent = (double) meta.getDamage() / item.getType().getMaxDurability();
-                    if (percent > maxDamagePercent) {
-                        maxDamagePercent = percent;
-                        target = item;
-                    }
-                }
+    @Override
+    public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (args.length > 0 && args[0].equalsIgnoreCase("reload")) {
+            if (!sender.hasPermission("bloodfix.admin")) {
+                sender.sendMessage(translate(getConfig().getString("messages.no-permission")));
+                return true;
             }
+            reloadConfig();
+            sender.sendMessage(translate(getConfig().getString("messages.reload-success")));
+            return true;
         }
-        return target;
+        return false;
+    }
+
+    private String translate(String message) {
+        if (message == null) return "";
+        Matcher matcher = hexPattern.matcher(message);
+        StringBuffer buffer = new StringBuffer();
+        while (matcher.find()) {
+            String color = message.substring(matcher.start(), matcher.end());
+            matcher.appendReplacement(buffer, ChatColor.of(color.substring(1)).toString());
+        }
+        matcher.appendTail(buffer);
+        return ChatColor.translateAlternateColorCodes('&', buffer.toString());
     }
 }
