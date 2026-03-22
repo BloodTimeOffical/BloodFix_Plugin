@@ -1,0 +1,4 @@
+name: BloodFix
+version: '${project.version}'
+main: com.bloodfix.bloodfix.BloodFix
+api-version: '1.16'
